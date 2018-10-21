@@ -32,6 +32,7 @@ int Chunk::getCompleteChunkSize(){return completeChunkSize;}
 int Chunk::getChunkNumber(){return chunkNumber;}
 int Chunk::getChunkContentSize(){return chunkContentSize;}
 bool Chunk::isFinalChunk(){return finalFlag;} 
+char * Chunk::getCompleteChunk(){return completeChunk;}
 
 Storage::Storage(std::string pathToDownloadFolder)
 {
@@ -47,9 +48,8 @@ Storage::Storage(std::string pathToDownloadFolder)
     }
 }
 
-int Storage::saveChunk(void *ptrToChunkData, size_t size, size_t count, std::string filename)
+int Storage::saveChunk(void *ptrToChunk, size_t size, size_t count, std::string filename)
 {
-    int numOfCharInChunk = (count*size) / sizeof(char);
     std::string pathToFileCompleted = pathToDownloadFolder + "/" + filename;
     std::string pathToFileOfDownloading = pathToDownloadFolder + "/" + filename + ".p2pdownloading";
     // chunks being saved should be incomplete files
@@ -67,44 +67,46 @@ int Storage::saveChunk(void *ptrToChunkData, size_t size, size_t count, std::str
         outfile.close();
     }
 
+    Chunk * chunkToSave = new Chunk(ptrToChunk,size,count,filename);
 
     bool finalChunkFound = false;
     int finalChunkNumber = -1;
 
-    int chunkNumberToSave = parseInt32((char*)ptrToChunkData);
+    int chunkNumberToSave = chunkToSave->getChunkNumber();
     // if saving chunk is final chunk
-    if(((char*)ptrToChunkData)[8] == true){
+    if(chunkToSave->isFinalChunk() == true){
         finalChunkFound = true;
         finalChunkNumber = chunkNumberToSave;
     }
 
-    char readChunkContent[fixedChunkContentSize];
-    char readChunkHeader[fixedChunkHeaderSize];
+    char readChunk[fixedChunkSizeWithHeader];
+
     std::ifstream is(pathToFileOfDownloading);
     int currChunkNumber;
     while (is.peek() != std::ifstream::traits_type::eof()){ // loop and search
-        is.read(readChunkHeader,fixedChunkHeaderSize);
-        is.read(readChunkContent,parseInt32(readChunkHeader+4));
-        currChunkNumber = parseInt32(readChunkHeader);
+        is.read(readChunk,fixedChunkSizeWithHeader);
+        Chunk * chunk = new Chunk(readChunk,sizeof(char),fixedChunkSizeWithHeader,filename);
+
+        currChunkNumber = chunk->getChunkNumber();
 
         if(currChunkNumber == chunkNumberToSave) {
             // if chunk to save is already downloaded
             return -1;
         }
 
-        if(readChunkHeader[8] == true){
+        if(chunk->isFinalChunk() == true){
             // if final chunk
             finalChunkFound = true;
-            finalChunkNumber = parseInt32(readChunkHeader);
+            finalChunkNumber = currChunkNumber;
         }
-
+        delete chunk;
     }
     is.close();
 
     // append chunk to end of file
     std::ofstream myfile;
     myfile.open (pathToFileOfDownloading, std::ios::app);
-    myfile.write( (char*)ptrToChunkData, numOfCharInChunk );    
+    myfile.write( (char*)chunkToSave->getCompleteChunk(), chunkToSave->getCompleteChunkSize() );    
     myfile.close();
 
     if(!finalChunkFound) {
@@ -120,9 +122,10 @@ int Storage::saveChunk(void *ptrToChunkData, size_t size, size_t count, std::str
 
     std::ifstream is2(pathToFileOfDownloading);
     while (is2.peek() != std::ifstream::traits_type::eof()){ 
-        is2.read(readChunkHeader,fixedChunkHeaderSize);
-        is2.read(readChunkContent, parseInt32(readChunkHeader+4));
-        chunkFlags[parseInt32(readChunkHeader)] = true;
+        is2.read(readChunk,fixedChunkSizeWithHeader);
+        Chunk * chunk = new Chunk(readChunk,sizeof(char),fixedChunkSizeWithHeader,filename);
+        chunkFlags[chunk->getChunkNumber()] = true;
+        delete chunk;
     }
     is2.close();
 
@@ -208,10 +211,10 @@ int Storage::getChunk(void *ptrToFillWithChunkData, std::string filename, int ch
     if(doesFileExist(pathToFileCompleted)){
         // get from completed file
         std::ifstream is(pathToFileCompleted);
-        char readChunk[fixedChunkSizeWithHeader];
         char readChunkContent[fixedChunkContentSize];
         char readChunkHeader[fixedChunkHeaderSize];
         int count = 1;
+        bool isFinalChunk = false;
         while (is.peek() != std::ifstream::traits_type::eof()){ // loop getting chunk
             is.read(readChunkContent,fixedChunkContentSize);
             // set chunk number
@@ -220,18 +223,17 @@ int Storage::getChunk(void *ptrToFillWithChunkData, std::string filename, int ch
             int chunkContentSize = is.gcount();
             serializeInt32(readChunkHeader+4, chunkContentSize);
             // set final flag
-            readChunkHeader[8] = false;
+            isFinalChunk = false;
             if(count == chunkNumber){
                 is.peek();
                 if(is.eof()){
-                    readChunkHeader[8] = true;
+                    isFinalChunk = true;
                 }
 
-                *chunkTotalByteSize = chunkContentSize + fixedChunkHeaderSize;                
-                memcpy(readChunk, readChunkHeader, fixedChunkHeaderSize);
-                memcpy(readChunk+fixedChunkHeaderSize, readChunkContent, chunkContentSize);
-                memcpy(ptrToFillWithChunkData, readChunk, fixedChunkSizeWithHeader);
+                Chunk* chunk = new Chunk(readChunkContent, sizeof(char), chunkContentSize, count, isFinalChunk, filename);
 
+                memcpy(ptrToFillWithChunkData, chunk->getCompleteChunk(), chunk->getCompleteChunkSize());
+                delete chunk;
                 is.close();
                 return 1;
             }
@@ -252,10 +254,9 @@ int Storage::getChunk(void *ptrToFillWithChunkData, std::string filename, int ch
             is.read(readChunkContent,chunkContentSize);
             int savedChunkNumber = parseInt32(readChunkHeader);
             if(chunkNumber == savedChunkNumber){
-                *chunkTotalByteSize = chunkContentSize + fixedChunkHeaderSize;                
-                memcpy(readChunk, readChunkHeader, fixedChunkHeaderSize);
-                memcpy(readChunk+fixedChunkHeaderSize, readChunkContent, chunkContentSize);
-                memcpy(ptrToFillWithChunkData, readChunk, fixedChunkSizeWithHeader);
+                Chunk* chunk = new Chunk(readChunk, sizeof(char), fixedChunkHeaderSize+chunkContentSize, filename);
+                memcpy(ptrToFillWithChunkData, chunk->getCompleteChunk(), chunk->getCompleteChunkSize());
+                delete chunk;
                 is.close();
                 return 1;
             }
@@ -263,8 +264,7 @@ int Storage::getChunk(void *ptrToFillWithChunkData, std::string filename, int ch
         is.close();
 
     }
-
-    return 1;
+    return -1;
 }
 
 void serializeInt32(char * buf, int32_t val)
@@ -294,7 +294,7 @@ int main()
         int i = rand() % 2000 + 1; // random test for file size less than 2000 * chunk content size
         int work = stor->getChunk(temp,"test.png",i, chunkSizeRecieved);
         if(work != -1){
-            stor->saveChunk(temp, sizeof(char), totalChunkSize, "test7.out");
+            stor->saveChunk(temp, sizeof(char), totalChunkSize, "test1.out");
         }
     }
 
